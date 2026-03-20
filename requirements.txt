@@ -1,0 +1,10 @@
+streamlit
+torch
+torchvision
+transformers
+Pillow
+google-genai
+datasets
+sentence-transformers
+chromadb
+bert-score
