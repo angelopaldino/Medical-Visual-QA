@@ -11,9 +11,8 @@ import re
 import time
 import warnings
 
-# ── Silenzia warning non critici ──────────────────────────────────────────────
-hf_logging.set_verbosity_error()   # UNEXPECTED keys, MISSING keys, ecc.
-warnings.filterwarnings("ignore")  # FutureWarning google.generativeai, ecc.
+hf_logging.set_verbosity_error()   
+warnings.filterwarnings("ignore")  
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAZIONE
