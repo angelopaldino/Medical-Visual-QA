@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAZIONE
 # ─────────────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY   = "AIzaSyAZt1B67V_XJrUhfCUygMAHcTt05mOTcjE"          
+GEMINI_API_KEY   = ""          
 GEMINI_MODEL     = "gemini-2.5-flash"
 MODEL_PATH       = "C:/Users/angel/OneDrive/Desktop/ProgettoNLP/models/best_vqa_model.pth"
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
