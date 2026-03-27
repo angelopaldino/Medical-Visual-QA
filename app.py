@@ -1,35 +1,21 @@
 """
 app.py — Interfaccia Web per Medical VQA (Streamlit)
 =====================================================
-Questo file implementa l'applicazione web interattiva che permette a un utente
-di caricare un'immagine radiologica, digitare una domanda clinica e ricevere
-una risposta generata dal modello VQA addestrato su VQA-RAD.
-
-Flusso dell'applicazione:
-  1. L'utente carica un'immagine e scrive una domanda tramite l'interfaccia Streamlit
-  2. Il tipo di domanda (CLOSED / OPEN) e la categoria clinica vengono inferiti automaticamente
-  3. L'immagine e la domanda contestualizzata vengono pre-elaborate e passate al modello
-  4. Il modello genera una risposta tramite beam search e calcola un punteggio di confidenza
-  5. Se la risposta non è vuota, Gemini 2.5 Flash produce una spiegazione clinica dettagliata
-  6. L'interfaccia mostra risposta, confidenza, metadati e spiegazione in un layout a due colonne
-
-Componenti principali:
-  - CustomMedVQAModel: architettura ViT-Large + Bio_ClinicalBERT + Cross-Attention + Dual Head
-  - infer_question_type / infer_answer_type: logica rule-based per classificare la domanda
-  - preprocess: prepara immagine e testo per il modello
-  - gemini_explain: chiama Gemini per generare la spiegazione clinica con retry automatico
-  - UI Streamlit: layout a due colonne con tema dark personalizzato via CSS inline
+Versione aggiornata con:
+- Supporto RAG tramite ChromaDB locale (VQA-RAD + PubMed/MedMCQA)
+- SDK Google GenerativeAI allineato al notebook
+- Gestione corretta della cache di Streamlit per pesi, tokenizer ed encoder
 """
 
 import streamlit as st
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import BertModel, ViTModel, AutoTokenizer, AutoImageProcessor
 from transformers import logging as hf_logging
 from PIL import Image
-from google import genai
-from google.genai import types
+import google.generativeai as genai
+import chromadb
+from sentence_transformers import SentenceTransformer
 import re
 import time
 import warnings
@@ -39,23 +25,15 @@ warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAZIONE
-#
-# Variabili globali che configurano il comportamento dell'app:
-# - GEMINI_API_KEY / GEMINI_MODEL: credenziali e modello per le spiegazioni cliniche
-# - MODEL_PATH: percorso locale del checkpoint .pth del modello addestrato
-# - DEVICE: GPU se disponibile, altrimenti CPU
-# - CONFIDENCE_THRESHOLD_*: soglie sotto le quali la risposta viene segnalata come incerta
-# - QTYPE_KEYWORDS: dizionario per inferire la categoria della domanda (posizione, dimensione, ecc.)
 # ─────────────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY   = ""          
 GEMINI_MODEL     = "gemini-2.5-flash"
-MODEL_PATH       = "C:/Users/angel/OneDrive/Desktop/ProgettoNLP/models/best_vqa_model.pth"
+MODEL_PATH       = "best_vqa_model.pth" # Modifica se serve un percorso assoluto
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CONFIDENCE_THRESHOLD_CLOSED = 0.80
 CONFIDENCE_THRESHOLD_OPEN   = 0.50
 
-# Keyword per inferire il tipo di domanda dalla domanda testuale
 QTYPE_KEYWORDS = {
     "PRES":  ["present", "there", "is there", "are there", "visible", "seen", "show"],
     "POS":   ["where", "location", "located", "position", "side", "region"],
@@ -67,22 +45,7 @@ QTYPE_KEYWORDS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODELLO
-#
-# Replica esatta dell'architettura usata durante il training (medicalvqa.ipynb).
-# È fondamentale che questa classe sia identica a quella del notebook: qualsiasi
-# differenza nella struttura dei layer causerebbe un errore nel load_state_dict.
-#
-# Architettura:
-#   - ViT-Large-patch32-384: encoder visivo, congelato tranne gli ultimi 3 layer
-#   - Bio_ClinicalBERT embeddings: layer di embedding per le domande
-#   - Cross-Attention (8 teste): fonde feature visive e linguistiche
-#   - Closed Head (MLP): per domande sì/no
-#   - Open Head (Transformer Decoder + beam search): per domande descrittive
-#
-# Il metodo generate() calcola anche uno score di confidenza:
-#   - Per CLOSED: probabilità massima del softmax della closed head
-#   - Per OPEN: best beam score normalizzato per lunghezza, convertito in probabilità lineare
+# ARCHITETTURA MODELLO
 # ─────────────────────────────────────────────────────────────────────────────
 class CustomMedVQAModel(nn.Module):
     def __init__(self, vocab_size, embed_dim=1024):
@@ -90,8 +53,6 @@ class CustomMedVQAModel(nn.Module):
         
         self.vision_encoder = ViTModel.from_pretrained("google/vit-large-patch32-384")
         
-        # --- TECNICA: FREEZING ---
-        # Blocchiamo i gradienti per l'encoder visivo per preservare i pesi pre-addestrati
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
 
@@ -103,14 +64,12 @@ class CustomMedVQAModel(nn.Module):
         for param in self.vision_encoder.layernorm.parameters():
             param.requires_grad = True
         
-        # 2. Embedding Linguistici (Bio_ClinicalBERT)
         bert_base = BertModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
         self.embedding = bert_base.embeddings.word_embeddings 
         self.vision_projection = nn.Linear(1024, 768)
         self.cross_attention = nn.MultiheadAttention(embed_dim=768, num_heads=8, batch_first=True)
         self.layer_norm = nn.LayerNorm(768)
 
-        # --- HEAD 1: Domande Chiuse (MLP) ---
         self.closed_head = nn.Sequential(
             nn.Linear(768, 256),
             nn.ReLU(),
@@ -118,16 +77,13 @@ class CustomMedVQAModel(nn.Module):
             nn.Linear(256, vocab_size) 
         )
 
-        # --- HEAD 2: Domande Aperte (Decoder) ---
         decoder_layer = nn.TransformerDecoderLayer(d_model=768, nhead=8, batch_first=True, dropout=0.27150897038028765)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=3)
         
         self.fc_out = nn.Linear(768, vocab_size)
         self.fc_out.weight = self.embedding.weight
 
-
     def forward(self, pixel_values, question_ids, answer_ids):
-        # Estrazione feature e Cross-Attention Fusion
         vision_feats = self.vision_encoder(pixel_values).last_hidden_state
         vision_feats = self.vision_projection(vision_feats)
         question_feats = self.embedding(question_ids)
@@ -135,11 +91,9 @@ class CustomMedVQAModel(nn.Module):
         attn_output, _ = self.cross_attention(query=vision_feats, key=question_feats, value=question_feats)
         memory = self.layer_norm(vision_feats + attn_output) 
         
-        # Output Head 1 (Domande Chiuse)
         pooled_memory = memory.mean(dim=1)
         closed_logits = self.closed_head(pooled_memory)
 
-        # Output Head 2 (Domande Aperte)
         answer_embeds = self.embedding(answer_ids)
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(answer_ids.size(1)).to(pixel_values.device)
         output = self.decoder(tgt=answer_embeds, memory=memory, tgt_mask=tgt_mask)
@@ -157,18 +111,15 @@ class CustomMedVQAModel(nn.Module):
         vision_feats   = self.vision_encoder(pixel_values).last_hidden_state
         vision_feats   = self.vision_projection(vision_feats)
         question_feats = self.embedding(question_ids)
-        attn_output, _ = self.cross_attention(query=vision_feats,
-                                               key=question_feats,
-                                               value=question_feats)
+        attn_output, _ = self.cross_attention(query=vision_feats, key=question_feats, value=question_feats)
         memory = self.layer_norm(vision_feats + attn_output)
  
         pooled_memory = memory.mean(dim=1)
         closed_logits = self.closed_head(pooled_memory)
         closed_preds  = closed_logits.argmax(dim=-1)
  
-        # ── NUOVO: confidence CLOSED = prob max dopo softmax ────────────────
         closed_probs       = torch.softmax(closed_logits, dim=-1)
-        closed_confidence  = closed_probs.max(dim=-1).values  # (batch_size,)
+        closed_confidence  = closed_probs.max(dim=-1).values  
  
         memory_expanded = memory.repeat_interleave(num_beams, dim=0)
         generated       = torch.full((batch_size * num_beams, 1),
@@ -179,18 +130,13 @@ class CustomMedVQAModel(nn.Module):
         beam_scores = beam_scores.view(-1)
  
         for _ in range(max_len):
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(
-                generated.size(1)
-            ).to(dev)
-            output            = self.decoder(tgt=self.embedding(generated),
-                                             memory=memory_expanded,
-                                             tgt_mask=tgt_mask)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(generated.size(1)).to(dev)
+            output = self.decoder(tgt=self.embedding(generated), memory=memory_expanded, tgt_mask=tgt_mask)
             next_token_logits = self.fc_out(output[:, -1, :])
             next_token_probs  = torch.log_softmax(next_token_logits, dim=-1)
  
             next_scores = next_token_probs + beam_scores[:, None]
-            next_scores = next_scores.view(batch_size,
-                                           num_beams * next_token_probs.size(-1))
+            next_scores = next_scores.view(batch_size, num_beams * next_token_probs.size(-1))
  
             topk_scores, topk_indices = torch.topk(next_scores, num_beams, dim=1)
             beam_ids  = topk_indices // next_token_probs.size(-1)
@@ -200,8 +146,7 @@ class CustomMedVQAModel(nn.Module):
             for i in range(batch_size):
                 for j in range(num_beams):
                     prev_idx = i * num_beams + beam_ids[i, j]
-                    new_seq  = torch.cat([generated[prev_idx],
-                                          token_ids[i, j].unsqueeze(0)])
+                    new_seq  = torch.cat([generated[prev_idx], token_ids[i, j].unsqueeze(0)])
                     new_generated.append(new_seq)
  
             generated   = torch.stack(new_generated)
@@ -211,16 +156,11 @@ class CustomMedVQAModel(nn.Module):
  
         best_generated = generated.view(batch_size, num_beams, -1)[:, 0, :]
  
-        # ── NUOVO: confidence OPEN = best beam score normalizzato ───────────
-        # best_beam_score è una log-prob cumulativa → la normalizziamo
-        # per lunghezza e la convertiamo in probabilità lineare
         best_beam_scores = beam_scores.view(batch_size, num_beams)[:, 0]
         seq_len          = best_generated.size(1)
         open_confidence  = torch.exp(best_beam_scores / max(seq_len, 1))
-        # clamp in [0,1] per sicurezza numerica
         open_confidence  = open_confidence.clamp(0.0, 1.0)
  
-        # ── Routing finale (identico all'originale) ──────────────────────────
         confidences = torch.zeros(batch_size, device=dev)
         for i in range(batch_size):
             if question_types[i] == 0:   # CLOSED
@@ -232,38 +172,10 @@ class CustomMedVQAModel(nn.Module):
             else:                        # OPEN
                 confidences[i]       = open_confidence[i]
  
-        # ──  restituisce anche confidences ──────────────────────────
         return best_generated, confidences   
 
-
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNZIONI DI SUPPORTO
-#
-# infer_question_type(question):
-#   Regola rule-based che cerca keyword nella domanda per determinare la categoria
-#   clinica (PRES=presenza, POS=posizione, ABN=anomalia, SIZE=dimensione, ecc.).
-#   Usata per costruire il prefisso contestuale [ORGANO | TIPO].
-#
-# infer_answer_type(question):
-#   Determina se la domanda è CLOSED (sì/no) o OPEN (risposta libera) guardando
-#   il verbo iniziale con espressioni regolari. Le domande che iniziano con is/are/
-#   was/were/does/do/has/have/can/could/did sono classificate come CLOSED.
-#
-# load_model_and_tokenizer():
-#   Carica il tokenizer, l'image processor e il modello dal checkpoint su disco.
-#   Decorata con @st.cache_resource per evitare ricaricamenti ad ogni interazione.
-#
-# preprocess(image, question, organ, q_type, ...):
-#   Pre-elabora l'immagine (converti in RGB, applica image processor) e la domanda
-#   (costruisci la versione contestualizzata, tokenizza). Restituisce i tensori
-#   pronti per essere passati al modello.
-#
-# gemini_explain(question, answer, organ, q_type, ans_type, confidence):
-#   Costruisce un prompt strutturato per Gemini con tutti i metadati della predizione
-#   e chiama l'API. Implementa retry con backoff esponenziale per il rate limit (429).
-#   Aggiunge una nota sulla confidenza nel prompt per guidare il tono della spiegazione.
+# FUNZIONI DI SUPPORTO & RAG
 # ─────────────────────────────────────────────────────────────────────────────
 def infer_question_type(question: str) -> str:
     q = question.lower()
@@ -273,7 +185,6 @@ def infer_question_type(question: str) -> str:
     return "UNKNOWN"
 
 def infer_answer_type(question: str) -> tuple[str, int]:
-    """Ritorna (ans_type_str, question_type_idx)."""
     q = question.lower().strip()
     closed_patterns = [
         r"^is\b", r"^are\b", r"^was\b", r"^were\b",
@@ -285,32 +196,87 @@ def infer_answer_type(question: str) -> tuple[str, int]:
     return "OPEN", 1
 
 @st.cache_resource(show_spinner=False)
-def load_model_and_tokenizer():
+def load_all_components():
+    """Carica modello VQA, Tokenizer e le istanze dei database RAG vettoriali."""
+    # 1. Modello e Tokenizer
     tokenizer       = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
     image_processor = AutoImageProcessor.from_pretrained("google/vit-large-patch32-384", use_fast=True)
     vocab_size      = len(tokenizer)
     model           = CustomMedVQAModel(vocab_size=vocab_size).to(DEVICE)
-    state_dict      = torch.load(MODEL_PATH, map_location=DEVICE)
+    
+    state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict)
     model.eval()
-    print(f"✅ MODELLO CUSTOM CARICATO DA DISCO: {MODEL_PATH}")
-    return model, tokenizer, image_processor
+    
+    # 2. Database RAG (ChromaDB) ed Encoder Vettoriale
+    rag_encoder = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
+    
+    # Assumiamo che le cartelle "chroma_vqa_index" e "chroma_kb_index" 
+    # si trovino nella stessa directory di questo script.
+    chroma_client_vqa = chromadb.PersistentClient(path="./chroma_vqa_index")
+    rag_collection = chroma_client_vqa.get_collection("vqa_rad_pairs")
+    
+    chroma_client_kb = chromadb.PersistentClient(path="./chroma_kb_index")
+    kb_collection = chroma_client_kb.get_collection("medical_kb")
+    
+    return model, tokenizer, image_processor, rag_encoder, rag_collection, kb_collection
+
+def retrieve_similar_pairs(query_question, rag_collection, encoder_model, k=3):
+    query_emb = encoder_model.encode(query_question).tolist()
+    results = rag_collection.query(
+        query_embeddings=[query_emb],
+        n_results=k
+    )
+    context_parts = []
+    if results['documents'] and len(results['documents'][0]) > 0:
+        for doc in results['documents'][0]:
+            context_parts.append(doc)
+            
+    if context_parts:
+        return "[CONTEXT] " + " | ".join(context_parts)
+    return ""
+
+def retrieve_kb_context(query_question, kb_collection, encoder_model, k=2):
+    query_emb = encoder_model.encode(query_question).tolist()
+    results = kb_collection.query(
+        query_embeddings=[query_emb],
+        n_results=k
+    )
+    context_parts = []
+    if results['documents'] and len(results['documents'][0]) > 0:
+        for doc in results['documents'][0]:
+            context_parts.append(doc)
+            
+    if context_parts:
+        return "[KB] " + " | ".join(context_parts)
+    return ""
 
 def preprocess(image: Image.Image, question: str, organ: str, q_type: str,
-               tokenizer, image_processor, max_len: int = 512):
+               tokenizer, image_processor, rag_encoder, rag_collection, kb_collection, max_len: int = 512):
     image = image.convert("RGB")
-    contextualized_q = f"[{organ} | {q_type}] {question}"
     pixel_values = image_processor(image, return_tensors="pt").pixel_values.to(DEVICE)
-    tokens       = tokenizer(contextualized_q, truncation=True,
-                              padding="max_length", max_length=max_len,
-                              return_tensors="pt")
+    
+    contextualized_q = f"[{organ} | {q_type}] {question}"
+    
+    # Generazione RAG Context
+    rag_context = retrieve_similar_pairs(contextualized_q, rag_collection, rag_encoder, k=3)
+    kb_context = retrieve_kb_context(contextualized_q, kb_collection, rag_encoder, k=2)
+    
+    # Concatena in stile Hierarchical Prompting
+    parts = [p for p in [rag_context, kb_context, contextualized_q] if p]
+    final_question = " ".join(parts)
+    
+    tokens = tokenizer(final_question, truncation=True,
+                       padding="max_length", max_length=max_len,
+                       return_tensors="pt")
     input_ids      = tokens.input_ids.to(DEVICE)
     attention_mask = tokens.attention_mask.to(DEVICE)
     return pixel_values, input_ids, attention_mask
 
 def gemini_explain(question: str, answer: str, organ: str, q_type: str,
                    ans_type: str, confidence: float) -> str:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(GEMINI_MODEL)
 
     confidence_note = (
         "The model answered with high confidence."
@@ -343,10 +309,9 @@ Explanation:"""
 
     for attempt in range(3):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
                     max_output_tokens=600,
                     temperature=0.3,
                 )
@@ -365,22 +330,6 @@ Explanation:"""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
-#
-# Layout a due colonne:
-#   - Colonna sinistra (col_left): upload immagine, input domanda, scelta organo, bottone
-#   - Colonna destra (col_right): risultati (risposta, metriche, spiegazione Gemini)
-#
-# Flusso all'interazione:
-#   1. Alla prima esecuzione, mostra una progress bar mentre carica il modello
-#      (il caricamento successivo è istantaneo grazie a st.cache_resource)
-#   2. Inferisce organo, q_type e ans_type dalla domanda e dalla scelta dell'utente
-#   3. Pre-elabora e chiama model.generate() per ottenere risposta e confidenza
-#   4. Calcola il colore del badge di confidenza (verde/giallo/rosso) in base alla soglia
-#   5. Se la risposta non è vuota e la confidenza è accettabile, chiama gemini_explain()
-#
-# Stile: tema dark personalizzato via CSS inline iniettato con st.markdown(unsafe_allow_html).
-#   Font DM Serif Display (titoli), DM Mono (label), DM Sans (testo).
-#   Variabili CSS per colori, bordi e accent — facilmente modificabili.
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="MedVQA · Radiology Assistant",
@@ -571,26 +520,26 @@ hr { border-color: var(--border) !important; margin: 2rem 0 !important; }
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("<h1>MedVQA</h1>", unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Radiology Visual Question Answering · BERTScore F1 85%</p>',
-            unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Radiology Visual Question Answering · BERTScore F1 85%</p>', unsafe_allow_html=True)
+
+# ── Caricamento Modelli e DB (eseguito solo una volta grazie a @st.cache_resource) ──
+with st.spinner("⏳ Inizializzazione RAG e Modelli Neurali... (richiesto solo al primo avvio)"):
+    model, tokenizer, image_processor, rag_encoder, rag_collection, kb_collection = load_all_components()
 
 # ── Layout principale ─────────────────────────────────────────────────────────
 col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
     st.markdown("#### 🩻 Immagine radiologica")
-    uploaded = st.file_uploader("Carica immagine radiologica", type=["png", "jpg", "jpeg"],
-                                  label_visibility="collapsed")
+    uploaded = st.file_uploader("Carica immagine radiologica", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
     image = None
     if uploaded:
         uploaded.seek(0)
         image = Image.open(uploaded).copy()
         st.image(image, width='stretch')
 
-
     st.markdown("#### 💬 Domanda clinica")
-    question = st.text_input("Domanda clinica", placeholder="Es: Is there a fracture visible?",
-                              label_visibility="collapsed")
+    question = st.text_input("Domanda clinica", placeholder="Es: Is there a fracture visible?", label_visibility="collapsed")
 
     st.markdown("#### 🫀 Organo anatomico")
     organ_choice = st.selectbox(
@@ -611,38 +560,18 @@ with col_right:
             st.warning("⚠️ Carica prima un'immagine radiologica.")
         elif not question.strip():
             st.warning("⚠️ Inserisci una domanda clinica.")
+        elif image is None:
+            st.warning("⚠️ Errore nel caricamento dell'immagine. Ricaricala.")
         else:
-            # ── Verifica che l'immagine sia stata caricata correttamente ──
-            if image is None:
-                st.warning("⚠️ Errore nel caricamento dell'immagine. Ricaricala.")
-                st.stop()
-
-            # ── Caricamento modello con progress bar ───────────────────────
-            is_first_load = "model_loaded" not in st.session_state
-            if is_first_load:
-                bar = st.progress(0, text="⏳ Inizializzazione modello...")
-                bar.progress(10, text="⏳ Caricamento tokenizer Bio_ClinicalBERT...")
-                model, tokenizer, image_processor = load_model_and_tokenizer()
-                bar.progress(90, text="⏳ Finalizzazione...")
-                bar.progress(100, text="✅ Modello pronto!")
-                time.sleep(0.6)
-                bar.empty()
-                st.session_state["model_loaded"] = True
-            else:
-                model, tokenizer, image_processor = load_model_and_tokenizer()
-
-            # Organo: sempre dalla scelta dell'utente
             organ   = organ_choice
             q_type  = infer_question_type(question)
             ans_type_str, q_type_idx = infer_answer_type(question)
 
-            
-            
-            print(f"🔍 INFERENZA: domanda='{question}', organo='{organ}', tipo='{ans_type_str}'")
-
-            with st.spinner("Analisi in corso..."):
+            with st.spinner("Ricerca vettoriale & Analisi in corso..."):
                 pixel_values, input_ids, _ = preprocess(
-                    image, question, organ, q_type, tokenizer, image_processor
+                    image, question, organ, q_type, 
+                    tokenizer, image_processor, 
+                    rag_encoder, rag_collection, kb_collection
                 )
                 q_type_tensor = torch.tensor([q_type_idx], dtype=torch.long).to(DEVICE)
 
@@ -658,7 +587,6 @@ with col_right:
                 answer     = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip().lower()
                 confidence = confidences[0].item()
 
-            # ── Gestione risposta vuota ────────────────────────────────────
             if not answer:
                 answer = "N/A"
                 st.markdown("""
@@ -669,7 +597,6 @@ with col_right:
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── Risposta ──────────────────────────────────────────────────
             st.markdown(f"""
             <div class="answer-card">
                 <div class="answer-label">Risposta del modello</div>
@@ -677,10 +604,8 @@ with col_right:
             </div>
             """, unsafe_allow_html=True)
 
-            # ── Metriche ──────────────────────────────────────────────────
             conf_pct    = confidence * 100
-            threshold   = (CONFIDENCE_THRESHOLD_CLOSED if ans_type_str == "CLOSED"
-                           else CONFIDENCE_THRESHOLD_OPEN) * 100
+            threshold   = (CONFIDENCE_THRESHOLD_CLOSED if ans_type_str == "CLOSED" else CONFIDENCE_THRESHOLD_OPEN) * 100
             conf_class  = "good" if conf_pct >= threshold else ("warn" if conf_pct >= threshold * 0.7 else "bad")
             bar_color   = {"good": "#3fb950", "warn": "#d29922", "bad": "#f85149"}[conf_class]
 
@@ -690,9 +615,7 @@ with col_right:
                     <div class="metric-label">Confidence</div>
                     <div class="metric-value {conf_class}">{conf_pct:.1f}%</div>
                     <div class="conf-bar-bg">
-                        <div class="conf-bar-fill"
-                             style="width:{conf_pct:.1f}%; background:{bar_color};">
-                        </div>
+                        <div class="conf-bar-fill" style="width:{conf_pct:.1f}%; background:{bar_color};"></div>
                     </div>
                 </div>
                 <div class="metric-card">
@@ -714,12 +637,10 @@ with col_right:
                 st.markdown(f"""
                 <div style="background:#21262d;border:1.5px solid #d29922;border-radius:8px;
                             padding:0.8rem 1.2rem;margin-top:0.5rem;font-size:0.88rem;color:#d29922;">
-                    ⚠️ Confidence sotto soglia ({threshold:.0f}%). 
-                    Verificare con un radiologo.
+                    ⚠️ Confidence sotto soglia ({threshold:.0f}%). Verificare con un radiologo.
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── Spiegazione Gemini (skip se answer è N/A) ─────────────────
             if answer != "N/A":
                 st.markdown("<hr>", unsafe_allow_html=True)
                 with st.spinner("Gemini sta elaborando la spiegazione clinica..."):
@@ -740,7 +661,6 @@ with col_right:
                 """, unsafe_allow_html=True)
 
     else:
-        # Placeholder quando non c'è ancora un risultato
         st.markdown("""
         <div style="height:100%;display:flex;flex-direction:column;justify-content:center;
                     align-items:center;padding:4rem 2rem;opacity:0.35;text-align:center;">
@@ -752,7 +672,6 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
 
-# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("<hr>", unsafe_allow_html=True)
 st.markdown("""
 <div style="font-family:'DM Mono',monospace;font-size:0.65rem;color:#30363d;
