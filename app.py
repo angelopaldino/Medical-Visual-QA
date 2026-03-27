@@ -47,7 +47,7 @@ warnings.filterwarnings("ignore")
 # - CONFIDENCE_THRESHOLD_*: soglie sotto le quali la risposta viene segnalata come incerta
 # - QTYPE_KEYWORDS: dizionario per inferire la categoria della domanda (posizione, dimensione, ecc.)
 # ─────────────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY   = "AIzaSyB5w82vpS7dBOEy-DAicBwObG7_9KgSqiE"          
+GEMINI_API_KEY   = ""          
 GEMINI_MODEL     = "gemini-2.5-flash"
 MODEL_PATH       = "C:/Users/angel/OneDrive/Desktop/ProgettoNLP/models/best_vqa_model.pth"
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
