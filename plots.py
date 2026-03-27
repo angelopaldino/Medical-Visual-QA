@@ -1,10 +1,50 @@
+"""
+plots.py — Visualizzazione dei risultati degli esperimenti di training Medical VQA
+===================================================================================
+Questo script raccoglie tutte le funzioni di plotting usate per analizzare e confrontare
+i risultati dei vari addestramenti del modello VQA. L'obiettivo è produrre grafici
+chiari e leggibili che mettano in evidenza i progressi tra un esperimento e l'altro,
+sia a livello globale che disaggregato per organo e tipo di risposta.
+
+Funzioni principali:
+  1. parse_files(file_list):
+       Legge i file di log .txt degli addestramenti ed estrae con regex le tre
+       metriche finali (Exact Match, BLEU-1, BERTScore F1). Usata come step
+       preliminare prima di plot_inference_metrics.
+
+  2. plot_inference_metrics(data):
+       Bar chart a gruppi che confronta le tre metriche su tutti gli esperimenti
+       con risultati di inferenza disponibili. Ogni esperimento ha tre barre
+       affiancate (una per metrica), con annotazioni numeriche sopra ciascuna.
+
+  3. mostra_tabella_grafica(domande, predizioni, ground_truths):
+       Genera un'immagine con una tabella visiva che mostra, per un campione
+       di esempi, la domanda, la predizione del modello, la ground truth e
+       l'esito (Corretta / Errata). Usa textwrap.fill per evitare che le
+       parole vengano spezzate a capo.
+
+  4. confronta_tutte_metriche_organi(lista_organi, dati_esperimenti):
+       Tre subplot affiancati (uno per metrica) che confrontano le performance
+       per organo (CHEST, HEAD, ABD) tra più esperimenti. Stampa anche una
+       tabella riassuntiva in formato markdown.
+
+  5. confronta_metriche_tipo_risposta(tipi_risposta, dati_esperimenti):
+       Stessa struttura della funzione precedente, ma disaggregata per tipo
+       di risposta (OPEN vs CLOSED) anziché per organo.
+
+Il blocco __main__ contiene i dati hardcoded degli esperimenti finali e le
+chiamate alle funzioni (alcune commentate per non rieseguirle ogni volta).
+"""
+
 import os
 import re
 import matplotlib.pyplot as plt
 import numpy as np
 import textwrap
 
-# Nomi dei file di testo caricati
+# Lista dei file di log degli addestramenti, in ordine cronologico.
+# Ogni file .txt contiene i log di un singolo run di training, con le metriche
+# finali stampate dal notebook medicalvqa.ipynb al termine della valutazione.
 files = [
     "./addestramento.txt", "./addestramento2.txt", "./addestramento3.txt",
     "./addestramento4.txt", "./addestramento5.txt", "./Addestramento6.txt",
@@ -14,8 +54,22 @@ files = [
 
 def parse_files(file_list):
     """
-    Legge tutti i file txt e sfrutta le espressioni regolari (Regex) 
-    per estrarre Validation Loss per ogni epoca, e le 3 metriche finali.
+    Legge i file di log degli addestramenti ed estrae le metriche finali di inferenza.
+
+    Per ogni file presente su disco, cerca con espressioni regolari tre valori:
+      - Exact Match Accuracy: percentuale di risposte identiche alla ground truth
+      - BLEU-1: punteggio di sovrapposizione lessicale (unigrammi)
+      - BERTScore F1: punteggio di similarità semantica
+
+    Le regex gestiscono varianti di nomenclatura nei diversi file di log
+    (es. 'Exact Match Accuracy' vs 'Exact Match Accuracy Globale').
+    Se un valore non viene trovato, viene impostato a 0.0 per sicurezza.
+
+    Args:
+        file_list: lista di percorsi ai file .txt dei log di training
+
+    Returns:
+        dict: chiave = percorso file, valore = dict con 'exact_match', 'bleu1', 'bert_f1'
     """
     data = {}
     for f in file_list:
@@ -37,8 +91,18 @@ def parse_files(file_list):
 
 def plot_inference_metrics(data):
     """
-    Funzione 2: Bar Plot che confronta le 3 metriche (Exact Match, BLEU, BERTScore) 
-    a livello di inferenza
+    Genera un bar chart a gruppi che confronta Exact Match, BLEU-1 e BERTScore F1
+    tra tutti gli esperimenti che hanno prodotto risultati di inferenza.
+
+    Per ogni esperimento vengono disegnate tre barre affiancate (una per metrica),
+    con annotazioni numeriche sopra ogni barra per leggibilità immediata.
+    Gli esperimenti senza metriche (es. addestramenti interrotti prima della valutazione)
+    vengono automaticamente esclusi dal grafico.
+
+    Il grafico viene salvato su disco come 'inference_metrics_comparison.png' a 300 DPI.
+
+    Args:
+        data: output di parse_files — dict {filename: {exact_match, bleu1, bert_f1}}
     """
     labels = []
     exact_matches = []
@@ -94,8 +158,23 @@ def plot_inference_metrics(data):
 
 def mostra_tabella_grafica(domande, predizioni, ground_truths):
     """
-    Genera un'immagine contenente la tabella visiva delle predizioni, 
-    rispettando le parole quando il testo va a capo.
+    Genera e salva un'immagine con una tabella visiva delle predizioni del modello.
+
+    Per ogni esempio mostra: domanda, risposta del modello, ground truth e
+    un esito colorato (verde = Corretta, rosso = Errata).
+
+    Usa textwrap.fill() per gestire il word wrapping senza spezzare le parole a metà,
+    assegnando larghezze in caratteri diverse per ogni colonna (domanda più larga,
+    esito più stretto). Le celle vengono scalate in altezza per contenere il testo
+    multiriga senza sovrapposizioni.
+
+    Il risultato viene salvato come 'tabella_predizioni_corretta.png' a 300 DPI
+    con bbox_inches='tight' per non tagliare i bordi della tabella.
+
+    Args:
+        domande: lista di stringhe con le domande cliniche
+        predizioni: lista di stringhe con le risposte generate dal modello
+        ground_truths: lista di stringhe con le risposte corrette
     """
     # 1. Calcolo degli esiti
     esiti = []
@@ -168,9 +247,23 @@ def mostra_tabella_grafica(domande, predizioni, ground_truths):
 
 def confronta_tutte_metriche_organi(lista_organi, dati_esperimenti):
     """
-    Riceve in input:
-    - lista_organi: I nomi degli organi (es. ["CHEST", "HEAD", "ABD"])
-    - dati_esperimenti: Un dizionario annidato con gli esperimenti e le relative metriche.
+    Confronta le performance del modello per organo anatomico tra più esperimenti.
+
+    Genera tre subplot affiancati (uno per ciascuna metrica: Exact Match, BLEU-1,
+    BERTScore F1). All'interno di ogni subplot, le barre sono raggruppate per organo,
+    e ogni gruppo mostra le barre dei diversi esperimenti side-by-side con colori
+    distinti dalla colormap 'tab10'.
+
+    Stampa anche una tabella riassuntiva in formato markdown con tutti i valori,
+    utile per una verifica numerica rapida.
+
+    La larghezza delle barre è calcolata dinamicamente in base al numero di esperimenti
+    per evitare sovrapposizioni indipendentemente da quanti run vengono confrontati.
+    La legenda appare solo nel primo subplot per non appesantire la visualizzazione.
+
+    Args:
+        lista_organi: lista di nomi degli organi (es. ["CHEST", "HEAD", "ABD"])
+        dati_esperimenti: dict annidato {nome_esperimento: {metrica: [val_per_organo]}}
     """
     metriche_da_plot = ["Exact Match", "BLEU-1", "BERTScore F1"]
     
@@ -242,9 +335,21 @@ def confronta_tutte_metriche_organi(lista_organi, dati_esperimenti):
 
 def confronta_metriche_tipo_risposta(tipi_risposta, dati_esperimenti):
     """
-    Riceve in input:
-    - tipi_risposta: I tipi di domanda (es. ["OPEN", "CLOSED"])
-    - dati_esperimenti: Un dizionario annidato con gli esperimenti e le relative metriche.
+    Confronta le performance del modello per tipo di risposta (OPEN vs CLOSED)
+    tra più esperimenti.
+
+    Stessa struttura di confronta_tutte_metriche_organi, ma l'asse X mostra
+    i tipi di risposta anziché gli organi. Usa la colormap 'Set2' per variare
+    visivamente rispetto all'altra funzione.
+
+    Questo confronto è particolarmente rivelatore: il modello tende ad avere
+    performance molto più alte sulle domande CLOSED (sì/no) rispetto a quelle
+    OPEN (risposte descrittive), ed è utile monitorare se questa disparità
+    si riduce tra un esperimento e l'altro.
+
+    Args:
+        tipi_risposta: lista dei tipi di risposta (es. ["OPEN", "CLOSED"])
+        dati_esperimenti: dict annidato {nome_esperimento: {metrica: [val_per_tipo]}}
     """
     metriche_da_plot = ["Exact Match", "BLEU-1", "BERTScore F1"]
     
@@ -318,6 +423,16 @@ def confronta_metriche_tipo_risposta(tipi_risposta, dati_esperimenti):
 
 
 # ==========================================
+# ENTRY POINT
+#
+# Il blocco principale esegue le funzioni di plotting con i dati hardcoded
+# degli esperimenti finali. Alcune chiamate sono commentate per non
+# rieseguire tutti i plot ogni volta — decommentare quelle di interesse.
+#
+# Struttura dei dati hardcoded:
+#   - dati_completi: metriche per organo (CHEST, HEAD, ABD) degli addestramenti 6-10
+#   - dati_tipo_risposta: metriche per tipo (OPEN, CLOSED) degli addestramenti 6-9
+#   - domande/preds/gts: campione di 6 esempi per la tabella predizioni
 # ==========================================
 if __name__ == "__main__":
 
