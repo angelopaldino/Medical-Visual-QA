@@ -13,22 +13,26 @@ import torch.nn as nn
 from transformers import BertModel, ViTModel, AutoTokenizer, AutoImageProcessor
 from transformers import logging as hf_logging
 from PIL import Image
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import chromadb
 from sentence_transformers import SentenceTransformer
 import re
 import time
+import os                             
+from dotenv import load_dotenv
 import warnings
 
 hf_logging.set_verbosity_error()
 warnings.filterwarnings("ignore")
+load_dotenv(dotenv_path="C:/Users/angel/OneDrive/Desktop/ProgettoNLP/progetto/codice/.env")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIGURAZIONE
 # ─────────────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY   = ""          
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY")          
 GEMINI_MODEL     = "gemini-2.5-flash"
-MODEL_PATH       = "best_vqa_model.pth" # Modifica se serve un percorso assoluto
+MODEL_PATH       = "C:/Users/angel/OneDrive/Desktop/ProgettoNLP/models/best_vqa_model.pth" 
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 CONFIDENCE_THRESHOLD_CLOSED = 0.80
@@ -213,10 +217,10 @@ def load_all_components():
     
     # Assumiamo che le cartelle "chroma_vqa_index" e "chroma_kb_index" 
     # si trovino nella stessa directory di questo script.
-    chroma_client_vqa = chromadb.PersistentClient(path="./chroma_vqa_index")
+    chroma_client_vqa = chromadb.PersistentClient(path="C:/Users/angel/Downloads/results/chroma_vqa_index")
     rag_collection = chroma_client_vqa.get_collection("vqa_rad_pairs")
     
-    chroma_client_kb = chromadb.PersistentClient(path="./chroma_kb_index")
+    chroma_client_kb = chromadb.PersistentClient(path="C:/Users/angel/Downloads/results/chroma_kb_index")
     kb_collection = chroma_client_kb.get_collection("medical_kb")
     
     return model, tokenizer, image_processor, rag_encoder, rag_collection, kb_collection
@@ -265,18 +269,23 @@ def preprocess(image: Image.Image, question: str, organ: str, q_type: str,
     # Concatena in stile Hierarchical Prompting
     parts = [p for p in [rag_context, kb_context, contextualized_q] if p]
     final_question = " ".join(parts)
+
+    # DEBUG
+    print(f"\n[DEBUG RAG] Domanda originale: {contextualized_q}")
+    print(f"[DEBUG RAG] Documenti estratti: {len(parts)-1}")
+    print(f"[DEBUG RAG] Prompt Finale inviato al modello:\n{final_question}\n")
     
     tokens = tokenizer(final_question, truncation=True,
                        padding="max_length", max_length=max_len,
                        return_tensors="pt")
     input_ids      = tokens.input_ids.to(DEVICE)
     attention_mask = tokens.attention_mask.to(DEVICE)
-    return pixel_values, input_ids, attention_mask
+    return pixel_values, input_ids, attention_mask, rag_context, kb_context
 
 def gemini_explain(question: str, answer: str, organ: str, q_type: str,
                    ans_type: str, confidence: float) -> str:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    # Inizializza il client con la nuova SDK
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     confidence_note = (
         "The model answered with high confidence."
@@ -309,9 +318,11 @@ Explanation:"""
 
     for attempt in range(3):
         try:
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
+            # Nuova sintassi di generazione per google.genai
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
                     max_output_tokens=600,
                     temperature=0.3,
                 )
@@ -568,7 +579,7 @@ with col_right:
             ans_type_str, q_type_idx = infer_answer_type(question)
 
             with st.spinner("Ricerca vettoriale & Analisi in corso..."):
-                pixel_values, input_ids, _ = preprocess(
+                pixel_values, input_ids, _, rag_context, kb_context = preprocess(
                     image, question, organ, q_type, 
                     tokenizer, image_processor, 
                     rag_encoder, rag_collection, kb_collection
@@ -586,6 +597,15 @@ with col_right:
 
                 answer     = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip().lower()
                 confidence = confidences[0].item()
+
+            # --- NOVITÀ: Interfaccia a comparsa per ispezionare il RAG ---
+            with st.expander("🔍 Ispeziona il contesto estratto dal RAG (ChromaDB)"):
+                st.markdown("**Contesto simile (VQA-RAD):**")
+                st.info(rag_context if rag_context else "Nessun documento simile trovato.")
+                
+                st.markdown("**Contesto Medico (PubMed/MedMCQA):**")
+                st.info(kb_context if kb_context else "Nessun documento medico trovato.")
+            # -------------------------------------------------------------    
 
             if not answer:
                 answer = "N/A"
