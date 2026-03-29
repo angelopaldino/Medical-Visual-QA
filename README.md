@@ -6,8 +6,8 @@
 graph TD
     %% INPUT LAYER
     subgraph Input_Layer [Input Utente]
-        IMG[Radiografia 🩻]
-        TEXT[Domanda Clinica 💬]
+        IMG[Radiografia ]
+        TEXT[Domanda Clinica ]
     end
 
     %% RAG MODULE
@@ -28,7 +28,7 @@ graph TD
     end
 
     %% NEURAL CORE
-    subgraph Neural_Backbone [Cuore Neurale]
+    subgraph Neural_Backbone [Componente Neurale]
         direction LR
         VIT[ViT-Large: Vision Encoder]
         BERT[Bio_ClinicalBERT: Language Embeddings]
@@ -58,8 +58,8 @@ graph TD
     %% UI & EXPLAINABILITY
     subgraph UI_Layer [Interfaccia & Spiegazione]
         ANS_C & ANS_O --> ST[Streamlit App]
-        ST --> GEMINI[Gemini: Spiegazione Clinica ✦]
-        ST --> PLOTLY[Plotly: Mappa 3D RAG 🌌]
+        ST --> GEMINI[Gemini: Spiegazione Clinica ]
+        ST --> PLOTLY[Plotly: Mappa 3D RAG ]
     end
 
 
