@@ -290,7 +290,7 @@ def preprocess(image: Image.Image, question: str, organ: str, q_type: str,
 
 def get_rag_3d_plot(collection, encoder, query_text, title="Mappa 3D RAG"):
     data = collection.get(include=['embeddings', 'metadatas', 'documents'])
-    if not data['embeddings'] or len(data['embeddings']) == 0:
+    if data.get('embeddings') is None or len(data['embeddings']) == 0:
         return None
         
     existing_embeddings = np.array(data['embeddings'])
@@ -643,7 +643,7 @@ with col_right:
 
             # --- NOVITÀ: Interfaccia a comparsa per ispezionare il RAG ---
             with st.expander(" Ispeziona il contesto estratto dal RAG (ChromaDB)"):
-                tab1, tab2 = st.tabs([" Testi estratti", " Visualizzazione"])
+                tab1, tab2, tab3 = st.tabs([" Testi estratti", " Visualizzazione VQA-RAD", "Visualizzazione PubMed/KB"])
                 with tab1:
                     st.markdown("**Contesto simile (VQA-RAD):**")
                     st.info(rag_context if rag_context else "Nessun documento simile trovato.")
@@ -655,9 +655,16 @@ with col_right:
                     # Generiamo il grafico per la collezione VQA-RAD (o quella che preferisci)
                     fig = get_rag_3d_plot(rag_collection, rag_encoder, question)
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
                     else:
                         st.error("Impossibile generare il grafico: dati non trovati.")
+
+                with tab3:
+                    st.markdown("#### La tua domanda rispetto alla letteratura scientifica")
+                    # --- QUI RICHIAMI LA SECONDA COLLEZIONE ---
+                    fig_kb = get_rag_3d_plot(kb_collection, rag_encoder, question, title="Universo PubMed/MedMCQA")
+                    if fig_kb:
+                        st.plotly_chart(fig_kb, width='stretch')
             # -------------------------------------------------------------    
 
             if not answer:
