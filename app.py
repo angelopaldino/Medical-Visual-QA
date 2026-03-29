@@ -210,6 +210,7 @@ def load_all_components():
     """Carica modello VQA, Tokenizer e le istanze dei database RAG vettoriali."""
     # 1. Modello e Tokenizer
     tokenizer       = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+    tokenizer.truncation_side = 'left'
     image_processor = AutoImageProcessor.from_pretrained("google/vit-large-patch32-384", use_fast=True)
     vocab_size      = len(tokenizer)
     model           = CustomMedVQAModel(vocab_size=vocab_size).to(DEVICE)

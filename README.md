@@ -1,5 +1,69 @@
 ﻿# Medical-Visual-QA
 
+##  Architettura del Sistema
+
+```mermaid
+graph TD
+    %% INPUT LAYER
+    subgraph Input_Layer [Input Utente]
+        IMG[Radiografia 🩻]
+        TEXT[Domanda Clinica 💬]
+    end
+
+    %% RAG MODULE
+    subgraph RAG_Engine [Modulo di Recupero - RAG]
+        CHROMA[(ChromaDB)]
+        EMB_MODEL[Sentence-PubMedBERT]
+        
+        TEXT -->|Encoding| EMB_MODEL
+        EMB_MODEL -->|Query| CHROMA
+        
+        CHROMA -->|Top-K| RAG1[Esperienza: VQA-RAD Pairs]
+        CHROMA -->|Top-K| RAG2[Scienza: PubMed/KB Articles]
+    end
+
+    %% PREPROCESSING
+    subgraph Prompt_Engineering [Hierarchical Prompting]
+        RAG1 & RAG2 & TEXT --> PROMPT["[Context] + [KB] + [Organ | Type] + Question"]
+    end
+
+    %% NEURAL CORE
+    subgraph Neural_Backbone [Cuore Neurale]
+        direction LR
+        VIT[ViT-Large: Vision Encoder]
+        BERT[Bio_ClinicalBERT: Language Embeddings]
+        
+        IMG --> VIT
+        PROMPT --> BERT
+    end
+
+    %% FUSION LAYER
+    subgraph Fusion_Core [Cross-Attention Fusion]
+        PROJ[Linear Projection]
+        VIT --> PROJ
+        ATTN{Multi-Head Cross Attention}
+        PROJ -->|Query| ATTN
+        BERT -->|Key/Value| ATTN
+    end
+
+    %% OUTPUT HEADS
+    subgraph Dual_Head_Output [Sistema a Due Teste]
+        ATTN -->|Pooled Memory| CLOSED[Closed Head: MLP]
+        ATTN -->|Full Memory| OPEN[Open Head: Transformer Decoder]
+        
+        CLOSED -->|Argmax| ANS_C[Risposta: Yes/No]
+        OPEN -->|Beam Search| ANS_O[Risposta: Descrizione]
+    end
+
+    %% UI & EXPLAINABILITY
+    subgraph UI_Layer [Interfaccia & Spiegazione]
+        ANS_C & ANS_O --> ST[Streamlit App]
+        ST --> GEMINI[Gemini: Spiegazione Clinica ✦]
+        ST --> PLOTLY[Plotly: Mappa 3D RAG 🌌]
+    end
+
+
+
 ## 🩻 MedVQA — Radiology Visual Question Answering
 
 > A multimodal deep learning system for answering clinical questions about radiology images, combining **ViT-Large** vision encoding, **Bio_ClinicalBERT** language embeddings, and **Gemini 2.5 Flash** for clinical explanation generation.
