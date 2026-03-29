@@ -41,6 +41,12 @@ import re
 import matplotlib.pyplot as plt
 import numpy as np
 import textwrap
+import pandas as pd
+import plotly.express as px
+from sklearn.decomposition import PCA
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import chromadb
 
 # Lista dei file di log degli addestramenti, in ordine cronologico.
 # Ogni file .txt contiene i log di un singolo run di training, con le metriche
@@ -333,6 +339,57 @@ def confronta_tutte_metriche_organi(lista_organi, dati_esperimenti):
     plt.show()
 
 
+def visualize_query_3d(collection, encoder, query_text, title="Visualizzazione 3D"):
+# 1. Recuperiamo i dati esistenti
+    data = collection.get(include=['embeddings', 'metadatas', 'documents'])
+    existing_embeddings = np.array(data['embeddings'])
+        
+    # 2. Trasformiamo la NUOVA domanda in un vettore (Embedding)
+    query_embedding = encoder.encode([query_text], normalize_embeddings=True)
+        
+    # 3. IL RESTRINGITORE (PCA)
+    # Importante: alleniamo il PCA su TUTTI i dati per creare lo spazio
+    pca = PCA(n_components=3)
+    pca.fit(existing_embeddings) 
+        
+    # Trasformiamo sia i dati vecchi che la nuova domanda nelle stesse 3 coordinate
+    coords_existing = pca.transform(existing_embeddings)
+    coords_query = pca.transform(query_embedding)
+
+    # 4. Prepariamo la tabella per i dati esistenti
+    df_existing = pd.DataFrame({
+        'x': coords_existing[:, 0], 'y': coords_existing[:, 1], 'z': coords_existing[:, 2],
+        'Etichetta': [m.get('organ', m.get('source', 'N/A')) for m in data['metadatas']],
+        'Testo': [d[:100] for d in data['documents']],
+        'Tipo': 'Archivio'
+    })
+
+    # 5. Prepariamo la tabella per il Punto Rosso
+    df_query = pd.DataFrame({
+        'x': [coords_query[0, 0]], 'y': [coords_query[0, 1]], 'z': [coords_query[0, 2]],
+        'Etichetta': ['DOMANDA NUOVA'],
+        'Testo': [query_text],
+        'Tipo': 'Query'
+    })
+
+    # Uniamo tutto
+    df_final = pd.concat([df_existing, df_query])
+
+    # 6. Disegniamo il grafico
+    fig = px.scatter_3d(
+        df_final, x='x', y='y', z='z',
+        color='Etichetta',
+        symbol='Tipo', # Cambia forma tra archivio e query
+        hover_data=['Testo'],
+        title=title,
+        template="plotly_dark"
+    )
+
+    fig.update_traces(marker=dict(size=10), selector=dict(name='DOMANDA NUOVA'))
+    fig.show()
+        
+
+
 def confronta_metriche_tipo_risposta(tipi_risposta, dati_esperimenti):
     """
     Confronta le performance del modello per tipo di risposta (OPEN vs CLOSED)
@@ -443,7 +500,7 @@ if __name__ == "__main__":
     domande = ["is there evidence of an aortic aneurysm?","is there airspace consolidation on the left side?","is there any intraparenchymal abnormalities in the lung fields?","What side is the pathology?","Describe the size of this lesion?","How do you determine cardiomegaly?"]
     preds = ["yes", "yes", "yes","right sided pleural effusion","5. 6cm focal, predominantly hypodense","right"]
     gts = ["yes", "yes","no","right sided pleural effusion","5. 6cm focal, predominantly hypodense","if the heart diameter is greater than half the diameter of the thoracic cavity"]
-    mostra_tabella_grafica(domande,preds, gts)
+    #mostra_tabella_grafica(domande,preds, gts)
 
     
     # Dati per la seconda funzione
@@ -504,3 +561,28 @@ if __name__ == "__main__":
         }
     }
     #confronta_metriche_tipo_risposta(tipi, dati_tipo_risposta)
+
+
+
+
+    rag_encoder = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO")
+    mia_domanda = "There are any fractures?"
+    # Percorsi presi dalle tue immagini (Usa la 'r' davanti per evitare errori con le barre \)
+    path_vqa = r"C:/Users/angel/Downloads/results/chroma_vqa_index"
+    path_kb  = r"C:/Users/angel/Downloads/results/chroma_kb_index"
+
+    client_vqa = chromadb.PersistentClient(path=path_vqa)
+    print("Collezioni in VQA:", client_vqa.list_collections())
+
+    client_kb = chromadb.PersistentClient(path=path_kb)
+    print("Collezioni in KB:", client_kb.list_collections())
+
+    rag_collection = client_vqa.get_collection("vqa_rad_pairs")
+    kb_collection = client_kb.get_collection("medical_kb")
+
+    visualize_query_3d(
+    collection=rag_collection, 
+    encoder=rag_encoder, 
+    query_text=mia_domanda, 
+    title="La mia domanda nell'Universo VQA"
+    )

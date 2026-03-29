@@ -19,6 +19,10 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 import re
 import time
+import pandas as pd
+import plotly.express as px
+from sklearn.decomposition import PCA
+import numpy as np
 import os                             
 from dotenv import load_dotenv
 import warnings
@@ -86,6 +90,8 @@ class CustomMedVQAModel(nn.Module):
         
         self.fc_out = nn.Linear(768, vocab_size)
         self.fc_out.weight = self.embedding.weight
+
+        
 
     def forward(self, pixel_values, question_ids, answer_ids):
         vision_feats = self.vision_encoder(pixel_values).last_hidden_state
@@ -281,6 +287,43 @@ def preprocess(image: Image.Image, question: str, organ: str, q_type: str,
     input_ids      = tokens.input_ids.to(DEVICE)
     attention_mask = tokens.attention_mask.to(DEVICE)
     return pixel_values, input_ids, attention_mask, rag_context, kb_context
+
+def get_rag_3d_plot(collection, encoder, query_text, title="Mappa 3D RAG"):
+    data = collection.get(include=['embeddings', 'metadatas', 'documents'])
+    if not data['embeddings'] or len(data['embeddings']) == 0:
+        return None
+        
+    existing_embeddings = np.array(data['embeddings'])
+    query_embedding = encoder.encode([query_text], normalize_embeddings=True)
+    
+    pca = PCA(n_components=3)
+    pca.fit(existing_embeddings) 
+    
+    coords_existing = pca.transform(existing_embeddings)
+    coords_query = pca.transform(query_embedding)
+
+    df_existing = pd.DataFrame({
+        'x': coords_existing[:, 0], 'y': coords_existing[:, 1], 'z': coords_existing[:, 2],
+        'Etichetta': [m.get('organ', m.get('source', 'N/A')) for m in data['metadatas']],
+        'Testo': [d[:100] for d in data['documents']],
+        'Tipo': 'Archivio'
+    })
+
+    df_query = pd.DataFrame({
+        'x': [coords_query[0, 0]], 'y': [coords_query[0, 1]], 'z': [coords_query[0, 2]],
+        'Etichetta': ['DOMANDA ATTUALE'], 'Testo': [query_text], 'Tipo': 'Query'
+    })
+
+    df_final = pd.concat([df_existing, df_query])
+    fig = px.scatter_3d(
+        df_final, x='x', y='y', z='z',
+        color='Etichetta', symbol='Tipo',
+        hover_data=['Testo'], title=title,
+        template="plotly_dark", height=600
+    )
+    fig.update_traces(marker=dict(size=4))
+    fig.update_traces(marker=dict(size=12, color='red'), selector=dict(name='DOMANDA ATTUALE'))
+    return fig
 
 def gemini_explain(question: str, answer: str, organ: str, q_type: str,
                    ans_type: str, confidence: float) -> str:
@@ -599,12 +642,22 @@ with col_right:
                 confidence = confidences[0].item()
 
             # --- NOVITÀ: Interfaccia a comparsa per ispezionare il RAG ---
-            with st.expander("🔍 Ispeziona il contesto estratto dal RAG (ChromaDB)"):
-                st.markdown("**Contesto simile (VQA-RAD):**")
-                st.info(rag_context if rag_context else "Nessun documento simile trovato.")
-                
-                st.markdown("**Contesto Medico (PubMed/MedMCQA):**")
-                st.info(kb_context if kb_context else "Nessun documento medico trovato.")
+            with st.expander(" Ispeziona il contesto estratto dal RAG (ChromaDB)"):
+                tab1, tab2 = st.tabs([" Testi estratti", " Visualizzazione"])
+                with tab1:
+                    st.markdown("**Contesto simile (VQA-RAD):**")
+                    st.info(rag_context if rag_context else "Nessun documento simile trovato.")
+                    st.markdown("**Contesto Medico (PubMed/MedMCQA):**")
+                    st.info(kb_context if kb_context else "Nessun documento medico trovato.")
+
+                with tab2:
+                    st.markdown("#### Posizionamento della domanda nella Knowledge Base")
+                    # Generiamo il grafico per la collezione VQA-RAD (o quella che preferisci)
+                    fig = get_rag_3d_plot(rag_collection, rag_encoder, question)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.error("Impossibile generare il grafico: dati non trovati.")
             # -------------------------------------------------------------    
 
             if not answer:
