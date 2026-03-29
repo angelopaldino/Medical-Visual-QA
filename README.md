@@ -61,7 +61,7 @@ graph TD
         ST --> GEMINI[Gemini: Spiegazione Clinica ]
         ST --> PLOTLY[Plotly: Mappa 3D RAG ]
     end
-
+```
 
 
 ## 🩻 MedVQA — Radiology Visual Question Answering
