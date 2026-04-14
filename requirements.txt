@@ -10,3 +10,6 @@ chromadb
 bert-score
 protobuf==3.20.3
 plotly
+transformers
+torch
+torchvision
