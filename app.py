@@ -575,7 +575,7 @@ hr { border-color: var(--border) !important; margin: 2rem 0 !important; }
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("<h1>MedVQA</h1>", unsafe_allow_html=True)
-st.markdown('<p class="subtitle">Radiology Visual Question Answering · BERTScore F1 85%</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Radiology Visual Question Answering</p>', unsafe_allow_html=True)
 
 # ── Caricamento Modelli e DB (eseguito solo una volta grazie a @st.cache_resource) ──
 with st.spinner("⏳ Inizializzazione RAG e Modelli Neurali... (richiesto solo al primo avvio)"):
@@ -585,7 +585,7 @@ with st.spinner("⏳ Inizializzazione RAG e Modelli Neurali... (richiesto solo a
 col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
-    st.markdown("#### 🩻 Immagine radiologica")
+    st.markdown("####  Immagine radiologica")
     uploaded = st.file_uploader("Carica immagine radiologica", type=["png", "jpg", "jpeg"], label_visibility="collapsed")
     image = None
     if uploaded:
@@ -593,17 +593,17 @@ with col_left:
         image = Image.open(uploaded).copy()
         st.image(image, width='stretch')
 
-    st.markdown("#### 💬 Domanda clinica")
+    st.markdown("#### Domanda clinica")
     question = st.text_input("Domanda clinica", placeholder="Es: Is there a fracture visible?", label_visibility="collapsed")
 
-    st.markdown("#### 🫀 Organo anatomico")
+    st.markdown("#### Tipo di Organo")
     organ_choice = st.selectbox(
         "Organo anatomico",
         options=["HEAD", "CHEST", "ABD"],
         format_func=lambda x: {
-            "HEAD":  "🧠 Head / Brain (CT · MRI)",
-            "CHEST": "🫁 Chest / Lung / Heart (X-Ray)",
-            "ABD":   "🫃 Abdomen (CT)",
+            "HEAD":  " Head / Brain (CT · MRI)",
+            "CHEST": " Chest / Lung / Heart (X-Ray)",
+            "ABD":   " Abdomen (CT)",
         }[x],
         label_visibility="collapsed"
     )
@@ -612,11 +612,11 @@ with col_left:
 with col_right:
     if run:
         if not uploaded:
-            st.warning("⚠️ Carica prima un'immagine radiologica.")
+            st.warning(" Carica prima un'immagine radiologica.")
         elif not question.strip():
-            st.warning("⚠️ Inserisci una domanda clinica.")
+            st.warning(" Inserisci una domanda clinica.")
         elif image is None:
-            st.warning("⚠️ Errore nel caricamento dell'immagine. Ricaricala.")
+            st.warning(" Errore nel caricamento dell'immagine. Ricaricala.")
         else:
             organ   = organ_choice
             q_type  = infer_question_type(question)
@@ -673,7 +673,7 @@ with col_right:
                 st.markdown("""
                 <div style="background:#21262d;border:1.5px solid #d29922;border-radius:8px;
                             padding:0.8rem 1.2rem;margin-bottom:0.5rem;font-size:0.88rem;color:#d29922;">
-                    ⚠️ Il modello non ha generato una risposta interpretabile. 
+                     Il modello non ha generato una risposta interpretabile. 
                     Prova a riformulare la domanda.
                 </div>
                 """, unsafe_allow_html=True)
@@ -718,7 +718,7 @@ with col_right:
                 st.markdown(f"""
                 <div style="background:#21262d;border:1.5px solid #d29922;border-radius:8px;
                             padding:0.8rem 1.2rem;margin-top:0.5rem;font-size:0.88rem;color:#d29922;">
-                    ⚠️ Confidence sotto soglia ({threshold:.0f}%). Verificare con un radiologo.
+                     Confidence sotto soglia ({threshold:.0f}%). Verificare con un radiologo.
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -745,7 +745,7 @@ with col_right:
         st.markdown("""
         <div style="height:100%;display:flex;flex-direction:column;justify-content:center;
                     align-items:center;padding:4rem 2rem;opacity:0.35;text-align:center;">
-            <div style="font-size:4rem;margin-bottom:1rem;">🩻</div>
+            <div style="font-size:4rem;margin-bottom:1rem;"></div>
             <div style="font-family:'DM Mono',monospace;font-size:0.75rem;
                         letter-spacing:2px;text-transform:uppercase;">
                 Carica un'immagine e scrivi<br>una domanda per iniziare

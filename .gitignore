@@ -1,3 +1,4 @@
 .env
 ./chroma_vqa_index
 chroma_vqa_index/chroma.sqlite3
+imgs
